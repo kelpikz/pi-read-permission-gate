@@ -1,0 +1,43 @@
+{
+	"name": "pi-read-permission-gate",
+	"version": "0.1.0",
+	"description": "A Pi extension that allows read-only tool calls and asks permission before non-read actions.",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"permission",
+		"read-only",
+		"agent"
+	],
+	"license": "MIT",
+	"type": "module",
+	"files": [
+		"src/",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"check": "tsc --noEmit",
+		"test": "npm run test:biome && npm run test:types && npm run test:unit",
+		"test:biome": "biome ci .",
+		"test:types": "tsc --noEmit",
+		"test:unit": "node --test",
+		"lint": "biome lint .",
+		"format": "biome format --write .",
+		"verify": "npm run format && npm run lint",
+		"pack:dry-run": "npm pack --dry-run"
+	},
+	"pi": {
+		"extensions": [
+			"./src/read-permission-gate.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.0",
+		"@earendil-works/pi-coding-agent": "*",
+		"typescript": "^5.8.3"
+	}
+}

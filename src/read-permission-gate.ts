@@ -2,125 +2,165 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { isAllowedToolCall } from "./allowed-tool-calls.js";
+import {
+	canRunToolCallInMode,
+	isPermissionMode,
+	type PermissionMode,
+	permissionModes,
+} from "./allowed-tool-calls.ts";
+import { installModeFooter } from "./footer.ts";
+import { askPermissionForModeOverride } from "./permission-dialog.ts";
+import {
+	getCycledPermissionMode,
+	modeDescriptions,
+	modeLabels,
+	permissionModeStorageKey,
+	restorePermissionModeFromEntries,
+} from "./permission-mode.ts";
 
 /**
  * Read Permission Gate
  *
- * Allows read-only tool calls by default and asks for confirmation before
- * every other tool call. In non-interactive modes, non-read tools are blocked.
+ * Enforces the active permission mode, asks for user approval before mode
+ * overrides, and renders the active mode in the TUI footer.
  */
 export default function (pi: ExtensionAPI) {
-	const decisions = new Map<
-		string,
-		{ allowed: true } | { allowed: false; reason: string }
-	>();
+	let activeMode: PermissionMode = "default";
 
-	function describeToolCall(toolName: string, input: Record<string, unknown>) {
-		if (toolName === "bash") {
-			return `Pi wants to run this command:\n\n  ${String(input.command ?? "")}`;
-		}
+	/**
+	 * Renders the current mode in the custom footer when UI is available.
+	 */
+	function renderModeStatus(ctx: ExtensionContext) {
+		installModeFooter(ctx, () => activeMode);
+	}
 
-		if (toolName === "write") {
-			return `Pi wants to write to:\n\n  ${String(input.path ?? "")}`;
-		}
+	/**
+	 * Changes the active mode and persists the change in the current session.
+	 */
+	function setMode(mode: PermissionMode, ctx: ExtensionContext) {
+		activeMode = mode;
+		pi.appendEntry(permissionModeStorageKey, { mode });
+		renderModeStatus(ctx);
+	}
 
-		if (toolName === "edit") {
-			return `Pi wants to edit:\n\n  ${String(input.path ?? "")}`;
-		}
-
-		const visibleInput = Object.fromEntries(
-			Object.entries(input).filter(([key]) => key !== "timeout"),
+	/**
+	 * Moves to the next or previous mode, wrapping around at either end.
+	 */
+	function cycleMode(direction: 1 | -1, ctx: ExtensionContext) {
+		const nextMode = getCycledPermissionMode(
+			activeMode,
+			permissionModes,
+			direction,
 		);
-		return `Pi wants to use the ${toolName} tool with:\n\n${JSON.stringify(visibleInput, null, 2)}`;
+
+		setMode(nextMode, ctx);
+		ctx.ui.notify(`Permission mode: ${modeLabels[nextMode]}`, "info");
 	}
 
-	async function askPermission(
-		toolName: string,
-		input: Record<string, unknown>,
-		ctx: ExtensionContext,
-	) {
-		// Some Pi execution contexts are non-interactive, such as API/SDK usage,
-		// scripts, CI, or headless runs. In those cases Pi cannot pause to show
-		// ctx.ui prompts, so fail closed instead of allowing unsafe tools silently.
-		if (!ctx.hasUI) {
-			return {
-				allowed: false as const,
-				reason: `Blocked non-read tool call "${toolName}" because no UI is available for confirmation.`,
-			};
-		}
-
-		const message = `${describeToolCall(toolName, input)}\n\nAllow this?`;
-		const choice = await ctx.ui.select(`Permission required\n\n${message}`, [
-			"Allow",
-			"Deny",
-			"Deny with reason",
-		]);
-
-		if (choice === "Allow") {
-			return { allowed: true as const };
-		}
-
-		if (choice === "Deny with reason") {
-			const denialReason = await ctx.ui.editor("Reason for denial");
-			const trimmedReason = denialReason?.trim();
-
-			return {
-				allowed: false as const,
-				reason: trimmedReason
-					? `Blocked non-read tool call "${toolName}" by user. Reason:\n${trimmedReason}`
-					: `Blocked non-read tool call "${toolName}" by user without a reason.`,
-			};
-		}
-
-		return {
-			allowed: false as const,
-			reason: `Blocked non-read tool call "${toolName}" by user.`,
-		};
+	/**
+	 * Restores the most recently selected mode from the session history.
+	 */
+	function restoreMode(ctx: ExtensionContext) {
+		activeMode = restorePermissionModeFromEntries(
+			ctx.sessionManager.getEntries(),
+			isPermissionMode,
+			activeMode,
+		);
 	}
 
-	// Ask as soon as the assistant message is complete, before tool execution starts.
-	// This keeps the user's decision time out of the built-in tool duration display.
-	pi.on("message_end", async (event, ctx) => {
-		if (event.message.role !== "assistant") return undefined;
+	pi.on("session_start", (_event, ctx) => {
+		restoreMode(ctx);
+		renderModeStatus(ctx);
+	});
 
-		const content = event.message.content as Array<{
-			type?: string;
-			id?: string;
-			name?: string;
-			arguments?: Record<string, unknown>;
-		}>;
+	pi.registerCommand("permission-mode", {
+		description: "Switch read-permission-gate mode: default, write, or yolo",
+		getArgumentCompletions: (prefix) =>
+			permissionModes
+				.filter((mode) => mode.startsWith(prefix.trim()))
+				.map((mode) => ({
+					value: mode,
+					label: `${modeLabels[mode]} - ${modeDescriptions[mode]}`,
+				})),
+		handler: async (args, ctx) => {
+			const requestedMode = args.trim().toLowerCase();
+			let nextMode: PermissionMode | undefined;
 
-		for (const block of content) {
-			if (block.type !== "toolCall" || !block.id || !block.name) continue;
+			if (requestedMode) {
+				if (!isPermissionMode(requestedMode)) {
+					ctx.ui.notify(
+						`Unknown mode "${requestedMode}". Use one of: ${permissionModes.join(", ")}`,
+						"error",
+					);
+					return;
+				}
+				nextMode = requestedMode;
+			} else if (ctx.hasUI) {
+				const choice = await ctx.ui.select("Select permission mode", [
+					"default",
+					"write",
+					"yolo",
+				]);
+				if (!choice || !isPermissionMode(choice)) return;
+				nextMode = choice;
+			} else {
+				return;
+			}
 
-			const input = block.arguments ?? {};
-			if (isAllowedToolCall(block.name, input) || decisions.has(block.id))
-				continue;
-			decisions.set(block.id, await askPermission(block.name, input, ctx));
-		}
+			setMode(nextMode, ctx);
+			ctx.ui.notify(`Permission mode: ${modeLabels[nextMode]}`, "info");
+		},
+	});
 
-		return undefined;
+	pi.registerCommand("mode", {
+		description: "Alias for /permission-mode",
+		getArgumentCompletions: (prefix) =>
+			permissionModes
+				.filter((mode) => mode.startsWith(prefix.trim()))
+				.map((mode) => ({ value: mode, label: modeLabels[mode] })),
+		handler: async (args, ctx) => {
+			const requestedMode = args.trim().toLowerCase();
+			if (!isPermissionMode(requestedMode)) {
+				ctx.ui.notify(`Usage: /mode ${permissionModes.join("|")}`, "error");
+				return;
+			}
+
+			setMode(requestedMode, ctx);
+			ctx.ui.notify(`Permission mode: ${modeLabels[requestedMode]}`, "info");
+		},
+	});
+
+	// Use Alt-based shortcuts because Ctrl+M is the same terminal control
+	// character as Enter and prevents users from submitting messages.
+	pi.registerShortcut("alt+m", {
+		description: "Cycle to the next read-permission-gate mode",
+		handler: async (ctx) => {
+			cycleMode(1, ctx);
+		},
+	});
+
+	pi.registerShortcut("alt+shift+m", {
+		description: "Cycle to the previous read-permission-gate mode",
+		handler: async (ctx) => {
+			cycleMode(-1, ctx);
+		},
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (
-			isAllowedToolCall(event.toolName, event.input as Record<string, unknown>)
-		)
-			return undefined;
-
-		// In the normal interactive path, message_end already collected the decision.
-		// Fallback here covers any mode/provider path that reaches tool_call first.
-		const decision =
-			decisions.get(event.toolCallId) ??
-			(await askPermission(
-				event.toolName,
-				event.input as Record<string, unknown>,
-				ctx,
-			));
-		decisions.delete(event.toolCallId);
+		const input = event.input as Record<string, unknown>;
+		const decision = canRunToolCallInMode(activeMode, event.toolName, input);
 
 		if (decision.allowed) return undefined;
-		return { block: true, reason: decision.reason };
+
+		const permission = await askPermissionForModeOverride(
+			activeMode,
+			event.toolName,
+			input,
+			decision.reason,
+			ctx,
+		);
+		if (permission.allowed) return undefined;
+
+		return { block: true, reason: permission.reason };
 	});
 }

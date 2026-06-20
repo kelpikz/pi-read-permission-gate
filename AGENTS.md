@@ -33,8 +33,8 @@ You should follow the following steps while developing any feature
 
 1. First add/update the unit tests for this behavior
 2. Then implement the code
-3. Run the test suit
-4. Run the formatter
+3. Run the formatter
+4. Run the test suit
 5. Fix any failures, and rerun step 3 and 4. Unti there aren't any more failures
-6. Give a report on what you changed once you rae done.
+6. Give a report on what you changed once you are done.
 

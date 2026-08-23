@@ -1,0 +1,97 @@
+[
+	{
+		"category": "read-only listing",
+		"command": "ls -la && find . -maxdepth 2 -type f | head -50",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "read-only listing",
+		"command": "find src -type f | sort | wc -l",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "read-only listing",
+		"command": "tail -20 build.log 2>/dev/null",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "quoted pipes",
+		"command": "rg -n \"error|warning\" src 2>/dev/null | head -20",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "quoted pipes",
+		"command": "grep -n \"foo|bar\" docs/*.md",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "semicolon chain",
+		"command": "pwd; ls; cat README.md",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "dev/null redirects",
+		"command": "find . -name \"*.tmp\" 2>/dev/null; true",
+		"currentlyAllowed": true
+	},
+	{
+		"category": "unwhitelisted command",
+		"command": "git status --short",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "unwhitelisted command",
+		"command": "echo ---; ls",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "unwhitelisted command",
+		"command": "printf \"%s\n\" hello",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "unwhitelisted command",
+		"command": "python --version",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "unwhitelisted command",
+		"command": "npm test",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "write redirect",
+		"command": "cat notes.md > notes-copy.md",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "write redirect",
+		"command": "ls >> out.txt",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "command substitution",
+		"command": "echo $(pwd)",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "background operator",
+		"command": "ls & pwd",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "dangling operator",
+		"command": "ls |",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "destructive command",
+		"command": "rm -rf build/",
+		"currentlyAllowed": false
+	},
+	{
+		"category": "heredoc script",
+		"command": "python - <<'PY'\nprint(1)\nPY",
+		"currentlyAllowed": false
+	}
+]

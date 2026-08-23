@@ -223,6 +223,16 @@ describe("isAllowedToolCall", () => {
 			}),
 			true,
 		);
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command: 'find ~/.pi -iname "*01a02d67*" 2>/dev/null; ls ~/.pi',
+			}),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "find src 2>/dev/null&& sort" }),
+			true,
+		);
 	});
 
 	it("still blocks redirects that write to real files", () => {

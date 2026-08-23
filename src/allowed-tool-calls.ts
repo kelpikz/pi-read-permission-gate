@@ -154,9 +154,10 @@ function isAllowedBashCommand(commandInput: string) {
 /**
  * Matches redirections whose target is exactly /dev/null, e.g. "2>/dev/null",
  * "> /dev/null", ">>/dev/null", or "&>/dev/null". The lookahead ensures the
- * target path ends at the redirect so paths like "/dev/null/copy.md" are rejected.
+ * target path ends at the redirect so paths like "/dev/null/copy.md" are rejected,
+ * while a directly following operator ("2>/dev/null;ls") is still accepted.
  */
-const devNullRedirectPattern = /(^|\s)\d*&?>>?\s*\/dev\/null(?=\s|$)/g;
+const devNullRedirectPattern = /(^|\s)\d*&?>>?\s*\/dev\/null(?=\s|$|[;&|])/g;
 
 /**
  * Removes redirections into /dev/null from a command, returning the rest of the

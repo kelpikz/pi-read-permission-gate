@@ -134,6 +134,42 @@ describe("isAllowedToolCall", () => {
 		);
 	});
 
+	it("allows pipes inside quoted arguments", () => {
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command:
+					'rg -n "\\bsetup\\s*\\(|main\\s*\\(|run\\.py|from main|import main" .',
+			}),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: 'rg "foo|bar" src' }),
+			true,
+		);
+	});
+
+	it("still validates pipelines outside quoted arguments", () => {
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command: 'rg "foo|bar" src | sort',
+			}),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command: 'rg "foo|bar" src | rm results.txt',
+			}),
+			false,
+		);
+	});
+
+	it("allows escaped pipe characters as arguments", () => {
+		assert.equal(
+			isAllowedToolCall("bash", { command: "rg foo\\|bar src" }),
+			true,
+		);
+	});
+
 	it("allows pipelines and boolean chains when every segment is read-only", () => {
 		assert.equal(
 			isAllowedToolCall("bash", { command: "find src -type f | sort" }),
@@ -154,6 +190,60 @@ describe("isAllowedToolCall", () => {
 		assert.equal(isAllowedToolCall("bash", {}), false);
 	});
 
+	it("allows semicolon-chained read-only commands", () => {
+		assert.equal(isAllowedToolCall("bash", { command: "pwd; ls" }), true);
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command: "find src -type f; sort | head -3",
+			}),
+			true,
+		);
+	});
+
+	it("allows redirects that discard output into /dev/null", () => {
+		assert.equal(
+			isAllowedToolCall("bash", { command: "ls ~/.pi 2>/dev/null" }),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "cat README.md >/dev/null" }),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "cat README.md >> /dev/null" }),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "find src -type f &>/dev/null" }),
+			true,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command: "find ~ -maxdepth 4 2>/dev/null | head -20",
+			}),
+			true,
+		);
+	});
+
+	it("still blocks redirects that write to real files", () => {
+		assert.equal(
+			isAllowedToolCall("bash", { command: "cat README.md > copy.md" }),
+			false,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "cat README.md >> copy.md" }),
+			false,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "find src -type f 2> errors.txt" }),
+			false,
+		);
+		assert.equal(
+			isAllowedToolCall("bash", { command: "ls >/dev/null/copy.md" }),
+			false,
+		);
+	});
+
 	it("blocks bash commands with unsafe shell syntax", () => {
 		assert.equal(
 			isAllowedToolCall("bash", { command: "cat README.md > copy.md" }),
@@ -165,7 +255,6 @@ describe("isAllowedToolCall", () => {
 		);
 		assert.equal(isAllowedToolCall("bash", { command: "echo $(pwd)" }), false);
 		assert.equal(isAllowedToolCall("bash", { command: "echo `pwd`" }), false);
-		assert.equal(isAllowedToolCall("bash", { command: "pwd; ls" }), false);
 	});
 
 	it("blocks bash chains containing an unknown or dangerous command", () => {
@@ -178,5 +267,15 @@ describe("isAllowedToolCall", () => {
 			false,
 		);
 		assert.equal(isAllowedToolCall("bash", { command: "ls; npm test" }), false);
+	});
+
+	it("blocks malformed or unsupported shell control syntax", () => {
+		assert.equal(isAllowedToolCall("bash", { command: "ls |" }), false);
+		assert.equal(isAllowedToolCall("bash", { command: "| ls" }), false);
+		assert.equal(isAllowedToolCall("bash", { command: "ls ||" }), false);
+		assert.equal(isAllowedToolCall("bash", { command: "ls & pwd" }), false);
+		assert.equal(isAllowedToolCall("bash", { command: "; ls" }), false);
+		assert.equal(isAllowedToolCall("bash", { command: "ls;" }), false);
+		assert.equal(isAllowedToolCall("bash", { command: "ls ;; pwd" }), false);
 	});
 });

@@ -136,13 +136,88 @@ function isAllowedBashCommand(commandInput: string) {
 	// Allow common read-only shell commands and directory changes without prompting.
 	// Keep this conservative: write redirection, pipes to unknown commands, command
 	// substitution, and shell control characters still require permission.
-	if (/`|\$\(|[;<>]/.test(command) || /(^|\s)(>>?|2>|&>)/.test(command)) {
+	// Redirections into /dev/null are stripped first since they only discard output.
+	const commandWithoutDevNullRedirects = stripDevNullRedirects(command);
+	if (/`|\$\(|[<>]/.test(commandWithoutDevNullRedirects)) {
 		return false;
 	}
 
-	const segments = command.split(/\s*(?:&&|\|\||\|)\s*/).filter(Boolean);
+	const segments = splitBashCommandIntoSegments(commandWithoutDevNullRedirects);
+	if (!segments) return false;
+
 	return segments.every((segment) => {
 		const commandName = segment.trim().split(/\s+/)[0];
 		return allowedBashCommands.has(commandName);
 	});
+}
+
+/**
+ * Matches redirections whose target is exactly /dev/null, e.g. "2>/dev/null",
+ * "> /dev/null", ">>/dev/null", or "&>/dev/null". The lookahead ensures the
+ * target path ends at the redirect so paths like "/dev/null/copy.md" are rejected.
+ */
+const devNullRedirectPattern = /(^|\s)\d*&?>>?\s*\/dev\/null(?=\s|$)/g;
+
+/**
+ * Removes redirections into /dev/null from a command, returning the rest of the
+ * command unchanged so it can be validated like any other read-only command.
+ */
+function stripDevNullRedirects(command: string): string {
+	return command.replace(devNullRedirectPattern, "$1");
+}
+
+/**
+ * Splits a bash command on supported operators while preserving quoted pipes.
+ * Returns undefined when the command contains malformed or unsupported syntax.
+ */
+function splitBashCommandIntoSegments(command: string): string[] | undefined {
+	const segments: string[] = [];
+	let segmentStart = 0;
+	let quote: "'" | '"' | undefined;
+	let escaped = false;
+
+	for (let index = 0; index < command.length; index += 1) {
+		const character = command[index];
+
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+
+		if (character === "\\" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+
+		if (quote) {
+			if (character === quote) quote = undefined;
+			continue;
+		}
+
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+
+		if (character !== "|" && character !== "&" && character !== ";") continue;
+
+		const nextCharacter = command[index + 1];
+		const isDoubleOperator = nextCharacter === character && character !== ";";
+		if (character === "&" && !isDoubleOperator) return undefined;
+
+		const segment = command.slice(segmentStart, index).trim();
+		if (!segment) return undefined;
+		segments.push(segment);
+
+		if (isDoubleOperator) index += 1;
+		segmentStart = index + 1;
+	}
+
+	if (quote || escaped) return undefined;
+
+	const finalSegment = command.slice(segmentStart).trim();
+	if (!finalSegment) return undefined;
+	segments.push(finalSegment);
+
+	return segments;
 }

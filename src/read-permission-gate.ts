@@ -3,6 +3,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	addSessionAllowance,
 	canRunToolCallInMode,
 	isPermissionMode,
 	type PermissionMode,
@@ -26,6 +27,13 @@ import {
  */
 export default function (pi: ExtensionAPI) {
 	let activeMode: PermissionMode = "default";
+
+	// Approvals granted via "Allow for this session" in the permission dialog.
+	// Kept in memory so they reset whenever pi restarts.
+	const sessionAllowances = {
+		allowedTools: new Set<string>(),
+		allowedBashCommandPrefixes: new Set<string>(),
+	};
 
 	/**
 	 * Renders the current mode in the custom footer when UI is available.
@@ -148,7 +156,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const input = event.input as Record<string, unknown>;
-		const decision = canRunToolCallInMode(activeMode, event.toolName, input);
+		const decision = canRunToolCallInMode(
+			activeMode,
+			event.toolName,
+			input,
+			sessionAllowances,
+		);
 
 		if (decision.allowed) return undefined;
 
@@ -159,8 +172,22 @@ export default function (pi: ExtensionAPI) {
 			decision.reason,
 			ctx,
 		);
-		if (permission.allowed) return undefined;
+		if (permission.outcome === "deny") {
+			return { block: true, reason: permission.reason };
+		}
 
-		return { block: true, reason: permission.reason };
+		if (permission.outcome === "allow-session") {
+			const approvedNames = addSessionAllowance(
+				sessionAllowances,
+				event.toolName,
+				input,
+			);
+			ctx.ui.notify(
+				`Allowed for this session: ${approvedNames.join(", ")}`,
+				"info",
+			);
+		}
+
+		return undefined;
 	});
 }

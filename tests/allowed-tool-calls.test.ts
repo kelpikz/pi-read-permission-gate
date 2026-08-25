@@ -3,9 +3,12 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 import {
+	addSessionAllowance,
 	canRunToolCallInMode,
+	extractBashCommandSegments,
 	isAllowedToolCall,
 	isPermissionMode,
+	type SessionAllowances,
 } from "../src/allowed-tool-calls.ts";
 
 describe("isPermissionMode", () => {
@@ -123,6 +126,7 @@ describe("isAllowedToolCall", () => {
 
 	it("allows conservative read-only bash commands", () => {
 		assert.equal(isAllowedToolCall("bash", { command: "pwd" }), true);
+		assert.equal(isAllowedToolCall("bash", { command: 'echo "---"' }), true);
 		assert.equal(isAllowedToolCall("bash", { command: "ls src" }), true);
 		assert.equal(
 			isAllowedToolCall("bash", { command: "rg permission src" }),
@@ -192,6 +196,13 @@ describe("isAllowedToolCall", () => {
 
 	it("allows semicolon-chained read-only commands", () => {
 		assert.equal(isAllowedToolCall("bash", { command: "pwd; ls" }), true);
+		assert.equal(
+			isAllowedToolCall("bash", {
+				command:
+					'cat ~/.pi/agent/settings.json 2>/dev/null; echo "---"; ls ~/.pi/agent/ 2>/dev/null',
+			}),
+			true,
+		);
 		assert.equal(
 			isAllowedToolCall("bash", {
 				command: "find src -type f; sort | head -3",
@@ -287,5 +298,233 @@ describe("isAllowedToolCall", () => {
 		assert.equal(isAllowedToolCall("bash", { command: "; ls" }), false);
 		assert.equal(isAllowedToolCall("bash", { command: "ls;" }), false);
 		assert.equal(isAllowedToolCall("bash", { command: "ls ;; pwd" }), false);
+	});
+});
+
+describe("extractBashCommandSegments", () => {
+	it("returns every segment of the command verbatim", () => {
+		assert.deepEqual(extractBashCommandSegments("npm run dev"), [
+			"npm run dev",
+		]);
+		assert.deepEqual(
+			extractBashCommandSegments('echo "---"; find src 2>/dev/null | head -20'),
+			['echo "---"', "find src", "head -20"],
+		);
+		assert.deepEqual(extractBashCommandSegments('rg "foo|bar" src'), [
+			'rg "foo|bar" src',
+		]);
+	});
+
+	it("returns undefined for empty or malformed commands", () => {
+		assert.equal(extractBashCommandSegments(""), undefined);
+		assert.equal(extractBashCommandSegments("ls & pwd"), undefined);
+		assert.equal(extractBashCommandSegments("echo $(pwd)"), undefined);
+		assert.equal(extractBashCommandSegments("cat f > copy.md"), undefined);
+	});
+});
+
+describe("session allowances", () => {
+	/** Creates an empty allowance store for a fresh session. */
+	function createEmptyAllowances(): SessionAllowances {
+		return {
+			allowedTools: new Set<string>(),
+			allowedBashCommandPrefixes: new Set<string>(),
+		};
+	}
+
+	it("does not change decisions when nothing was approved yet", () => {
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm test" },
+				createEmptyAllowances(),
+			).allowed,
+			false,
+		);
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"write",
+				{ path: "a.txt" },
+				createEmptyAllowances(),
+			).allowed,
+			false,
+		);
+	});
+
+	it("allows commands that extend an approved command line", () => {
+		const allowances = createEmptyAllowances();
+		assert.deepEqual(
+			addSessionAllowance(allowances, "bash", { command: "npm run dev" }),
+			["npm run dev"],
+		);
+
+		// The exact approved command line runs again without prompting.
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm run dev" },
+				allowances,
+			).allowed,
+			true,
+		);
+		// Extra arguments after the approved command line are fine.
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm run dev -- --watch" },
+				allowances,
+			).allowed,
+			true,
+		);
+		// Already-safe whitelist commands keep working alongside approvals.
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm run dev && ls src" },
+				allowances,
+			).allowed,
+			true,
+		);
+	});
+
+	it("does not approve sibling invocations of the same binary", () => {
+		const allowances = createEmptyAllowances();
+		addSessionAllowance(allowances, "bash", { command: "npm run dev" });
+
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm run test" },
+				allowances,
+			).allowed,
+			false,
+		);
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm install" },
+				allowances,
+			).allowed,
+			false,
+		);
+		// A matching prefix alone is not enough: "debug" merely shares the
+		// start of "dev" but is a different subcommand.
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm run debug" },
+				allowances,
+			).allowed,
+			false,
+		);
+	});
+
+	it("still blocks commands that were not part of the session approval", () => {
+		const allowances = createEmptyAllowances();
+		addSessionAllowance(allowances, "bash", { command: "npm test" });
+
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "npm install && rm -rf dist" },
+				allowances,
+			).allowed,
+			false,
+		);
+	});
+
+	it("does not let a session approval bypass unsafe shell syntax", () => {
+		const allowances = createEmptyAllowances();
+		addSessionAllowance(allowances, "bash", { command: "cat README.md" });
+
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "cat $(pwd)" },
+				allowances,
+			).allowed,
+			false,
+		);
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"bash",
+				{ command: "cat README.md > copy.md" },
+				allowances,
+			).allowed,
+			false,
+		);
+	});
+
+	it("allows a tool for the whole session once approved", () => {
+		const allowances = createEmptyAllowances();
+		assert.deepEqual(
+			addSessionAllowance(allowances, "write", { path: "notes.txt" }),
+			["write"],
+		);
+
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"write",
+				{ path: "other.txt" },
+				allowances,
+			).allowed,
+			true,
+		);
+		assert.equal(
+			canRunToolCallInMode("default", "edit", { path: "other.txt" }, allowances)
+				.allowed,
+			false,
+		);
+	});
+
+	it("applies session approvals inside multi-tool batches", () => {
+		const allowances = createEmptyAllowances();
+		addSessionAllowance(allowances, "bash", { command: "npm test" });
+
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"multi_tool_use.parallel",
+				{
+					tool_uses: [
+						{
+							recipient_name: "functions.bash",
+							parameters: { command: "npm test -- --run" },
+						},
+					],
+				},
+				allowances,
+			).allowed,
+			true,
+		);
+
+		assert.equal(
+			canRunToolCallInMode(
+				"default",
+				"multi_tool_use.parallel",
+				{
+					tool_uses: [
+						{
+							recipient_name: "functions.bash",
+							parameters: { command: "npm run lint" },
+						},
+					],
+				},
+				allowances,
+			).allowed,
+			false,
+		);
 	});
 });

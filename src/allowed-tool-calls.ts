@@ -3,6 +3,7 @@ const allowedWriteModeTools = new Set(["read", "write", "edit"]);
 const allowedBashCommands = new Set([
 	"cat",
 	"cd",
+	"echo",
 	"find",
 	"grep",
 	"head",
@@ -19,6 +20,21 @@ const allowedBashCommands = new Set([
 export const permissionModes = ["default", "write", "yolo"] as const;
 export type PermissionMode = (typeof permissionModes)[number];
 
+/**
+ * Commands and tools the user approved "for this session" via the permission
+ * dialog. Kept in memory so approvals reset whenever pi restarts.
+ */
+/**
+ * Commands and tools the user approved "for this session" via the permission
+ * dialog. Bash approvals are stored as full command-line prefixes (e.g.
+ * "npm run dev") so only extensions of them run without prompting. Kept in
+ * memory so approvals reset whenever pi restarts.
+ */
+export interface SessionAllowances {
+	allowedTools: Set<string>;
+	allowedBashCommandPrefixes: Set<string>;
+}
+
 export type ToolCallDecision =
 	| { allowed: true }
 	| { allowed: false; reason: string };
@@ -31,17 +47,23 @@ export function isPermissionMode(value: string): value is PermissionMode {
 }
 
 /**
- * Decides whether a tool call can run under the active permission mode.
+ * Decides whether a tool call can run under the active mode, taking session
+ * approvals into account.
  */
 export function canRunToolCallInMode(
 	mode: PermissionMode,
 	toolName: string,
 	input: Record<string, unknown>,
+	sessionAllowances?: SessionAllowances,
 ): ToolCallDecision {
 	if (mode === "yolo") return { allowed: true };
 
+	if (isApprovedForSession(toolName, input, sessionAllowances)) {
+		return { allowed: true };
+	}
+
 	if (toolName === "multi_tool_use.parallel") {
-		return canRunMultiToolCallInMode(mode, input);
+		return canRunMultiToolCallInMode(mode, input, sessionAllowances);
 	}
 
 	if (mode === "write") {
@@ -77,6 +99,7 @@ export function canRunToolCallInMode(
 function canRunMultiToolCallInMode(
 	mode: PermissionMode,
 	input: Record<string, unknown>,
+	sessionAllowances?: SessionAllowances,
 ): ToolCallDecision {
 	const toolUses = input.tool_uses;
 	if (!Array.isArray(toolUses)) {
@@ -96,6 +119,7 @@ function canRunMultiToolCallInMode(
 			mode,
 			childToolName,
 			child.parameters ?? {},
+			sessionAllowances,
 		);
 		if (!decision.allowed) return decision;
 	}
@@ -110,6 +134,91 @@ function normalizeToolName(toolName: string) {
 	return toolName.startsWith("functions.")
 		? toolName.slice("functions.".length)
 		: toolName;
+}
+
+/**
+ * Extracts every segment of a bash command verbatim, e.g. "npm test && ls" ->
+ * ["npm test", "ls"]. Returns undefined when the command is empty or contains
+ * malformed or unsupported syntax, so callers never derive allowances from
+ * commands they cannot fully parse.
+ */
+export function extractBashCommandSegments(
+	commandInput: string,
+): string[] | undefined {
+	const command = commandInput.trim();
+	if (!command) return undefined;
+
+	const commandWithoutDevNullRedirects = stripDevNullRedirects(command);
+	if (/`|\$\(|[<>]/.test(commandWithoutDevNullRedirects)) return undefined;
+
+	return splitBashCommandIntoSegments(commandWithoutDevNullRedirects);
+}
+
+/**
+ * Returns true when a single bash segment either starts with a built-in safe
+ * command or extends a command line approved earlier this session, e.g.
+ * "npm run dev -- --watch" extends the approval "npm run dev", while
+ * "npm run test" does not.
+ */
+function isSegmentCoveredByApproval(
+	segment: string,
+	sessionAllowances: SessionAllowances,
+) {
+	const baseCommand = segment.split(/\s+/)[0];
+	if (allowedBashCommands.has(baseCommand)) return true;
+
+	for (const prefix of sessionAllowances.allowedBashCommandPrefixes) {
+		if (segment === prefix || segment.startsWith(`${prefix} `)) return true;
+	}
+	return false;
+}
+
+/**
+ * Returns true when the tool call matches an earlier "allow for this session"
+ * approval. Bash calls qualify only when every segment is whitelisted or
+ * extends an approved prefix; other tools qualify by name.
+ */
+function isApprovedForSession(
+	toolName: string,
+	input: Record<string, unknown>,
+	sessionAllowances?: SessionAllowances,
+) {
+	if (!sessionAllowances) return false;
+
+	if (toolName === "bash") {
+		const segments = extractBashCommandSegments(String(input.command ?? ""));
+		return (
+			segments?.every((segment) =>
+				isSegmentCoveredByApproval(segment, sessionAllowances),
+			) ?? false
+		);
+	}
+
+	return sessionAllowances.allowedTools.has(toolName);
+}
+
+/**
+ * Records a "allow for this session" approval for the given tool call. For
+ * bash commands every segment's command line is remembered as a prefix; for
+ * other tools the tool name itself. Returns what was recorded so callers can
+ * confirm to the user what will be skipped next time.
+ */
+export function addSessionAllowance(
+	sessionAllowances: SessionAllowances,
+	toolName: string,
+	input: Record<string, unknown>,
+): string[] {
+	if (toolName === "bash") {
+		const segments =
+			extractBashCommandSegments(String(input.command ?? "")) ?? [];
+		for (const segment of segments) {
+			sessionAllowances.allowedBashCommandPrefixes.add(segment);
+		}
+		return segments;
+	}
+
+	sessionAllowances.allowedTools.add(toolName);
+	return [toolName];
 }
 
 /**

@@ -22,10 +22,6 @@ export type PermissionMode = (typeof permissionModes)[number];
 
 /**
  * Commands and tools the user approved "for this session" via the permission
- * dialog. Kept in memory so approvals reset whenever pi restarts.
- */
-/**
- * Commands and tools the user approved "for this session" via the permission
  * dialog. Bash approvals are stored as full command-line prefixes (e.g.
  * "npm run dev") so only extensions of them run without prompting. Kept in
  * memory so approvals reset whenever pi restarts.
@@ -33,6 +29,12 @@ export type PermissionMode = (typeof permissionModes)[number];
 export interface SessionAllowances {
 	allowedTools: Set<string>;
 	allowedBashCommandPrefixes: Set<string>;
+}
+
+/** Represents one tool call shown in a permission dialog. */
+export interface PermissionToolCall {
+	toolName: string;
+	input: Record<string, unknown>;
 }
 
 export type ToolCallDecision =
@@ -56,18 +58,19 @@ export function canRunToolCallInMode(
 	input: Record<string, unknown>,
 	sessionAllowances?: SessionAllowances,
 ): ToolCallDecision {
+	const normalizedToolName = normalizeToolName(toolName);
 	if (mode === "yolo") return { allowed: true };
 
-	if (isApprovedForSession(toolName, input, sessionAllowances)) {
+	if (isApprovedForSession(normalizedToolName, input, sessionAllowances)) {
 		return { allowed: true };
 	}
 
-	if (toolName === "multi_tool_use.parallel") {
+	if (normalizedToolName === "multi_tool_use.parallel") {
 		return canRunMultiToolCallInMode(mode, input, sessionAllowances);
 	}
 
 	if (mode === "write") {
-		if (toolName === "bash") {
+		if (normalizedToolName === "bash") {
 			return isAllowedBashCommand(String(input.command ?? ""))
 				? { allowed: true }
 				: {
@@ -77,19 +80,19 @@ export function canRunToolCallInMode(
 					};
 		}
 
-		return allowedWriteModeTools.has(toolName)
+		return allowedWriteModeTools.has(normalizedToolName)
 			? { allowed: true }
 			: {
 					allowed: false,
-					reason: `Blocked tool call "${toolName}" because write mode only allows Pi file tools and conservative read-only bash commands.`,
+					reason: `Blocked tool call "${normalizedToolName}" because write mode only allows Pi file tools and conservative read-only bash commands.`,
 				};
 	}
 
-	return isAllowedToolCall(toolName, input)
+	return isAllowedToolCall(normalizedToolName, input)
 		? { allowed: true }
 		: {
 				allowed: false,
-				reason: `Blocked tool call "${toolName}" because default mode only allows read-only operations. Switch to write or YOLO mode if needed.`,
+				reason: `Blocked tool call "${normalizedToolName}" because default mode only allows read-only operations. Switch to write or YOLO mode if needed.`,
 			};
 }
 
@@ -101,24 +104,19 @@ function canRunMultiToolCallInMode(
 	input: Record<string, unknown>,
 	sessionAllowances?: SessionAllowances,
 ): ToolCallDecision {
-	const toolUses = input.tool_uses;
-	if (!Array.isArray(toolUses)) {
+	const toolCalls = extractMultiToolCalls(input);
+	if (!toolCalls) {
 		return {
 			allowed: false,
 			reason: "Blocked malformed multi-tool call.",
 		};
 	}
 
-	for (const toolUse of toolUses) {
-		const child = toolUse as {
-			recipient_name?: unknown;
-			parameters?: Record<string, unknown>;
-		};
-		const childToolName = normalizeToolName(String(child.recipient_name ?? ""));
+	for (const toolCall of toolCalls) {
 		const decision = canRunToolCallInMode(
 			mode,
-			childToolName,
-			child.parameters ?? {},
+			toolCall.toolName,
+			toolCall.input,
 			sessionAllowances,
 		);
 		if (!decision.allowed) return decision;
@@ -134,6 +132,70 @@ function normalizeToolName(toolName: string) {
 	return toolName.startsWith("functions.")
 		? toolName.slice("functions.".length)
 		: toolName;
+}
+
+/** Returns true when a value can be used as a tool input object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Extracts child calls from a multi-tool wrapper while normalizing their names.
+ * An undefined result means the wrapper input is malformed.
+ */
+function extractMultiToolCalls(
+	input: Record<string, unknown>,
+): PermissionToolCall[] | undefined {
+	if (!Array.isArray(input.tool_uses)) return undefined;
+
+	return input.tool_uses.map((toolUse) => {
+		if (!isRecord(toolUse)) {
+			return { toolName: "", input: {} };
+		}
+
+		return {
+			toolName: normalizeToolName(String(toolUse.recipient_name ?? "")),
+			input: isRecord(toolUse.parameters) ? toolUse.parameters : {},
+		};
+	});
+}
+
+/**
+ * Finds the blocked child calls in a tool call, omitting safe children from
+ * the permission question. Nested multi-tool wrappers are flattened too.
+ */
+export function getPermissionRequiredToolCalls(
+	mode: PermissionMode,
+	toolName: string,
+	input: Record<string, unknown>,
+	sessionAllowances?: SessionAllowances,
+): PermissionToolCall[] {
+	const normalizedToolName = normalizeToolName(toolName);
+
+	if (normalizedToolName === "multi_tool_use.parallel") {
+		const childToolCalls = extractMultiToolCalls(input);
+		if (!childToolCalls) {
+			return [{ toolName: normalizedToolName, input }];
+		}
+
+		return childToolCalls.flatMap((childToolCall) =>
+			getPermissionRequiredToolCalls(
+				mode,
+				childToolCall.toolName,
+				childToolCall.input,
+				sessionAllowances,
+			),
+		);
+	}
+
+	return canRunToolCallInMode(
+		mode,
+		normalizedToolName,
+		input,
+		sessionAllowances,
+	).allowed
+		? []
+		: [{ toolName: normalizedToolName, input }];
 }
 
 /**
@@ -185,6 +247,8 @@ function isApprovedForSession(
 ) {
 	if (!sessionAllowances) return false;
 
+	if (toolName === "multi_tool_use.parallel") return false;
+
 	if (toolName === "bash") {
 		const segments = extractBashCommandSegments(String(input.command ?? ""));
 		return (
@@ -208,7 +272,26 @@ export function addSessionAllowance(
 	toolName: string,
 	input: Record<string, unknown>,
 ): string[] {
-	if (toolName === "bash") {
+	const normalizedToolName = normalizeToolName(toolName);
+
+	if (normalizedToolName === "multi_tool_use.parallel") {
+		const childToolCalls = extractMultiToolCalls(input);
+		if (!childToolCalls) return [];
+
+		return [
+			...new Set(
+				childToolCalls.flatMap((childToolCall) =>
+					addSessionAllowance(
+						sessionAllowances,
+						childToolCall.toolName,
+						childToolCall.input,
+					),
+				),
+			),
+		];
+	}
+
+	if (normalizedToolName === "bash") {
 		const segments =
 			extractBashCommandSegments(String(input.command ?? "")) ?? [];
 		for (const segment of segments) {
@@ -217,8 +300,26 @@ export function addSessionAllowance(
 		return segments;
 	}
 
-	sessionAllowances.allowedTools.add(toolName);
-	return [toolName];
+	sessionAllowances.allowedTools.add(normalizedToolName);
+	return [normalizedToolName];
+}
+
+/** Records several permission-approved calls and returns unique allowance names. */
+export function addSessionAllowances(
+	sessionAllowances: SessionAllowances,
+	toolCalls: readonly PermissionToolCall[],
+): string[] {
+	return [
+		...new Set(
+			toolCalls.flatMap((toolCall) =>
+				addSessionAllowance(
+					sessionAllowances,
+					toolCall.toolName,
+					toolCall.input,
+				),
+			),
+		),
+	];
 }
 
 /**
@@ -228,9 +329,10 @@ export function isAllowedToolCall(
 	toolName: string,
 	input: Record<string, unknown>,
 ) {
-	if (allowedTools.has(toolName)) return true;
+	const normalizedToolName = normalizeToolName(toolName);
+	if (allowedTools.has(normalizedToolName)) return true;
 
-	if (toolName !== "bash") return false;
+	if (normalizedToolName !== "bash") return false;
 
 	return isAllowedBashCommand(String(input.command ?? ""));
 }
@@ -309,10 +411,17 @@ function splitBashCommandIntoSegments(command: string): string[] | undefined {
 			continue;
 		}
 
-		if (character !== "|" && character !== "&" && character !== ";") continue;
+		if (
+			character !== "|" &&
+			character !== "&" &&
+			character !== ";" &&
+			character !== "\n"
+		)
+			continue;
 
 		const nextCharacter = command[index + 1];
-		const isDoubleOperator = nextCharacter === character && character !== ";";
+		const isDoubleOperator =
+			nextCharacter === character && character !== ";" && character !== "\n";
 		if (character === "&" && !isDoubleOperator) return undefined;
 
 		const segment = command.slice(segmentStart, index).trim();

@@ -1,5 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { PermissionMode } from "./allowed-tool-calls.ts";
+import type {
+	PermissionMode,
+	PermissionToolCall,
+} from "./allowed-tool-calls.ts";
+import { extractBashCommandSegments } from "./allowed-tool-calls.ts";
 import { modeLabels } from "./permission-mode.ts";
 
 /**
@@ -18,7 +22,15 @@ export function describeToolCall(
 	input: Record<string, unknown>,
 ) {
 	if (toolName === "bash") {
-		return `bash command: ${String(input.command ?? "")}`;
+		const command = String(input.command ?? "");
+		const commandSegments = extractBashCommandSegments(command);
+		if (commandSegments && commandSegments.length > 1) {
+			return `bash commands:\n${commandSegments
+				.map((segment) => `- ${segment}`)
+				.join("\n")}`;
+		}
+
+		return `bash command: ${command}`;
 	}
 
 	if (toolName === "write" || toolName === "edit") {
@@ -26,6 +38,15 @@ export function describeToolCall(
 	}
 
 	return `tool: ${toolName}`;
+}
+
+/** Formats several tool calls as a readable list for the permission prompt. */
+export function describeToolCalls(toolCalls: readonly PermissionToolCall[]) {
+	return toolCalls
+		.map(
+			(toolCall) => `- ${describeToolCall(toolCall.toolName, toolCall.input)}`,
+		)
+		.join("\n");
 }
 
 /**
@@ -38,6 +59,9 @@ export async function askPermissionForModeOverride(
 	input: Record<string, unknown>,
 	decisionReason: string,
 	ctx: ExtensionContext,
+	permissionRequiredToolCalls: readonly PermissionToolCall[] = [
+		{ toolName, input },
+	],
 ): Promise<PermissionOutcome> {
 	if (!ctx.hasUI) {
 		return {
@@ -46,8 +70,20 @@ export async function askPermissionForModeOverride(
 		};
 	}
 
+	const toolCallsToDescribe =
+		permissionRequiredToolCalls.length > 0
+			? permissionRequiredToolCalls
+			: [{ toolName, input }];
+	const toolDescription =
+		toolCallsToDescribe.length === 1
+			? describeToolCall(
+					toolCallsToDescribe[0].toolName,
+					toolCallsToDescribe[0].input,
+				)
+			: describeToolCalls(toolCallsToDescribe);
+
 	const choice = await ctx.ui.select(
-		`${modeLabels[activeMode]} mode permission required\n\n${decisionReason}\n\nPi wants to run:\n\n${describeToolCall(toolName, input)}\n\nAllow this?`,
+		`${modeLabels[activeMode]} mode permission required\n\n${decisionReason}\n\nPi wants to run (the "Allow for this session" option will allow these calls for the rest of this session):\n\n${toolDescription}\n\nAllow this?`,
 		["Allow", "Allow for this session", "Deny", "Deny with reason"],
 	);
 

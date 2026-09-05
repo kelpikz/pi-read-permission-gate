@@ -21,8 +21,11 @@ Prompts before allowing:
 When prompted, you can:
 
 - Allow
+- Allow for this session
 - Deny
 - Deny with a reason
+
+For parallel tool calls, the prompt lists only the calls that need permission. Choosing "Allow for this session" approves those listed calls, while read-only calls in the same batch stay out of the list.
 
 ## Install from GitHub
 
